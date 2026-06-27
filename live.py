@@ -6,6 +6,7 @@ Run:  python live.py
 Stop: Ctrl+C
 """
 
+import json
 import time
 import logging
 import MetaTrader5 as mt5
@@ -13,6 +14,35 @@ import pandas as pd
 
 from app import MT5Service
 from app.signals import latest_signal
+
+CONFIG_FILE = "config.json"
+
+
+def load_config() -> dict:
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def is_enabled() -> bool:
+    return load_config().get("is_enable", True)
+
+
+def calc_volume(equity: float, base_equity: float) -> float:
+    """คำนวณ lot size จาก config.
+
+    dynamic : scale ตาม equity ปัจจุบัน เทียบกับ base_equity
+    fixed   : ใช้ lot_size คงที่
+    """
+    cfg = load_config()
+    base_lot = cfg.get("lot_size", 0.01)
+    if cfg.get("lot_size_type") == "dynamic":
+        lot = base_lot * (equity / base_equity)
+        lot = max(0.01, round(lot / 0.01) * 0.01)
+        return lot
+    return base_lot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +55,6 @@ log = logging.getLogger(__name__)
 SYMBOL       = "EURUSDm"
 TIMEFRAME    = mt5.TIMEFRAME_H4
 LOOKBACK     = 200          # bars ที่ดึงมาคำนวณ indicator
-VOLUME       = 0.01         # lot size
 SL_PCT       = 0.01         # 1% stop loss  (ตรงกับ backtest sl_stop=0.01)
 TP_PCT       = 0.02         # 2% take profit (ตรงกับ backtest tp_stop=0.02)
 MAGIC        = 20240101     # unique ID — ใช้กรองว่า position ไหนเปิดโดย bot นี้
@@ -94,10 +123,11 @@ def close_position() -> None:
             log.error("Close failed: %s", result.comment)
 
 
-def open_order(svc: MT5Service, direction: str) -> None:
+def open_order(svc: MT5Service, direction: str, equity: float, base_equity: float) -> None:
     """เปิด order BUY หรือ SELL พร้อม SL/TP แบบ percentage."""
     tick = mt5.symbol_info_tick(SYMBOL)
     price = tick.ask if direction == "BUY" else tick.bid
+    volume = calc_volume(equity, base_equity)
 
     if direction == "BUY":
         sl = round(price * (1 - SL_PCT), 5)
@@ -109,27 +139,37 @@ def open_order(svc: MT5Service, direction: str) -> None:
     svc.send_order(
         symbol=SYMBOL,
         order_type=direction,
-        volume=VOLUME,
+        volume=volume,
         sl=sl,
         tp=tp,
         magic=MAGIC,
         comment=f"bot-{direction.lower()}",
     )
-    log.info("Opened %-4s @ %.5f  SL=%.5f  TP=%.5f", direction, price, sl, tp)
+    log.info("Opened %-4s @ %.5f  lot=%.2f  SL=%.5f  TP=%.5f", direction, price, volume, sl, tp)
 
 
 def run_live():
-    log.info("Starting live loop — %s H4  vol=%.2f", SYMBOL, VOLUME)
+    log.info("Starting live loop — %s H4", SYMBOL)
     last_bar_time = None
 
     with MT5Service() as svc:
         balance = svc.get_info("balance")
         log.info("Account balance: %.2f %s", balance, svc.get_info("currency"))
 
+        cfg_base = load_config().get("base_equity", -1)
+        base_equity = svc.get_info("equity") if cfg_base == -1 else cfg_base
+        log.info("Base equity: %.2f (source: %s)", base_equity,
+                 "account_info" if cfg_base == -1 else "config.json")
+
         while True:
             try:
                 df = fetch_df()
                 bar_time = df.index[-2]     # bar ปิดล่าสุด (ไม่ใช่ bar ที่กำลังก่อตัว)
+
+                if not is_enabled():
+                    log.info("Bot disabled (is_enable=false) — skipping.")
+                    time.sleep(POLL_SECONDS)
+                    continue
 
                 if bar_time == last_bar_time:
                     time.sleep(POLL_SECONDS)
@@ -138,16 +178,18 @@ def run_live():
                 last_bar_time = bar_time
                 log.info("New bar: %s  close=%.5f", bar_time, df["close"].iloc[-2])
 
-                sig = latest_signal(df, **LONG_PARAMS, **SHORT_PARAMS)
-                pos = get_position()
+                equity = svc.get_info("equity")
+                sig    = latest_signal(df, **LONG_PARAMS, **SHORT_PARAMS)
+                pos    = get_position()
 
-                log.info("Signal: %s  |  Position: %s", sig, pos)
+                log.info("Signal: %s  |  Position: %s  |  Equity: %.2f  |  Lot: %.2f",
+                         sig, pos, equity, calc_volume(equity, base_equity))
 
                 # ── ฝั่ง Long ──────────────────────────────────────────────
                 if sig["long_entry"] and pos != "BUY":
                     if pos == "SELL":
                         close_position()
-                    open_order(svc, "BUY")
+                    open_order(svc, "BUY", equity, base_equity)
 
                 elif sig["long_exit"] and pos == "BUY":
                     close_position()
@@ -156,7 +198,7 @@ def run_live():
                 if sig["short_entry"] and pos != "SELL":
                     if pos == "BUY":
                         close_position()
-                    open_order(svc, "SELL")
+                    open_order(svc, "SELL", equity, base_equity)
 
                 elif sig["short_exit"] and pos == "SELL":
                     close_position()
