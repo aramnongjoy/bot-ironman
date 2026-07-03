@@ -98,6 +98,8 @@ POLL_SECONDS = 5 * 60
 
 def fetch_df(symbol: str, timeframe: int) -> pd.DataFrame:
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, LOOKBACK)
+    if rates is None or len(rates) == 0:
+        raise RuntimeError(f"No data for {symbol} — {mt5.last_error()}")
     df = pd.DataFrame(rates)
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df = df.set_index("time")
