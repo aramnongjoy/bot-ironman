@@ -14,7 +14,7 @@ from app.signals import generate_signals
 SYMBOL      = "BTCUSDc"
 TIMEFRAME   = mt5.TIMEFRAME_H4
 NUM_BARS    = 5000
-INIT_CASH   = 2_000.0
+INIT_CASH   = 2_154.21
 TRAIN_RATIO = 0.70      # 70% train / 30% out-of-sample test
 
 
