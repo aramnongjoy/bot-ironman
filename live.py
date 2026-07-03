@@ -96,14 +96,18 @@ MAGIC        = 20240101
 POLL_SECONDS = 5 * 60
 
 
-def fetch_df(symbol: str, timeframe: int) -> pd.DataFrame:
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, LOOKBACK)
-    if rates is None or len(rates) == 0:
-        raise RuntimeError(f"No data for {symbol} — {mt5.last_error()}")
-    df = pd.DataFrame(rates)
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df = df.set_index("time")
-    return df.rename(columns={"tick_volume": "volume"})
+def fetch_df(symbol: str, timeframe: int, retries: int = 3, delay: float = 5.0) -> pd.DataFrame:
+    for attempt in range(1, retries + 1):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, LOOKBACK)
+        if rates is not None and len(rates) > 0:
+            df = pd.DataFrame(rates)
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            df = df.set_index("time")
+            return df.rename(columns={"tick_volume": "volume"})
+        log.warning("fetch_df attempt %d/%d failed — %s", attempt, retries, mt5.last_error())
+        if attempt < retries:
+            time.sleep(delay)
+    raise RuntimeError(f"No data for {symbol} after {retries} attempts — {mt5.last_error()}")
 
 
 def get_position(symbol: str) -> str | None:
