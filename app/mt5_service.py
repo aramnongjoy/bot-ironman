@@ -21,15 +21,27 @@ class MT5Service:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    def connect(self) -> None:
-        """Initialize MT5 and log in to the trade account."""
-        if self._path:
-            ok = mt5.initialize(path=self._path)
-        else:
-            ok = mt5.initialize()
+    def connect(self, retries: int = 5, retry_delay: float = 10.0) -> None:
+        """Initialize MT5 and log in to the trade account.
 
-        if not ok:
-            raise ConnectionError(f"MT5 initialize failed: {mt5.last_error()}")
+        Retries up to `retries` times with `retry_delay` seconds between attempts
+        to handle cases where the MT5 terminal is still starting up.
+        """
+        for attempt in range(1, retries + 1):
+            if self._path:
+                ok = mt5.initialize(path=self._path)
+            else:
+                ok = mt5.initialize()
+
+            if ok:
+                break
+
+            err = mt5.last_error()
+            if attempt < retries:
+                print(f"MT5 initialize attempt {attempt}/{retries} failed {err} — retrying in {retry_delay}s")
+                time.sleep(retry_delay)
+            else:
+                raise ConnectionError(f"MT5 initialize failed after {retries} attempts: {err}")
 
         if not mt5.login(login=self._login, password=self._password, server=self._server):
             mt5.shutdown()
